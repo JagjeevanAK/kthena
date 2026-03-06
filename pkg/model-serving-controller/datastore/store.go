@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
@@ -287,30 +288,28 @@ func (s *store) AddServingGroup(modelServingName types.NamespacedName, idx int, 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	newGroup := &ServingGroup{
-		Name:        utils.GenerateServingGroupName(modelServingName.Name, idx),
+	name := utils.GenerateServingGroupName(modelServingName.Name, idx)
+
+	if _, ok := s.servingGroup[modelServingName]; !ok {
+		s.servingGroup[modelServingName] = make(map[string]*ServingGroup)
+	}
+
+	if _, ok := s.servingGroup[modelServingName][name]; ok {
+		return
+	}
+	s.servingGroup[modelServingName][name] = &ServingGroup{
+		Name:        name,
 		runningPods: make(map[string]struct{}),
 		Status:      ServingGroupCreating,
 		Revision:    revision,
 		roles:       make(map[string]map[string]*Role),
 	}
-
-	if _, ok := s.servingGroup[modelServingName]; !ok {
-		s.servingGroup[modelServingName] = make(map[string]*ServingGroup)
-	}
-	s.servingGroup[modelServingName][newGroup.Name] = newGroup
 }
 
 // AddRole adds a new role to an ServingGroup
 func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleName, roleID, revision string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-
-	newRole := &Role{
-		Name:     roleID,
-		Status:   RoleCreating,
-		Revision: revision,
-	}
 
 	if _, ok := s.servingGroup[modelServingName]; !ok {
 		s.servingGroup[modelServingName] = make(map[string]*ServingGroup)
@@ -332,7 +331,18 @@ func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleNa
 		group.roles[roleName] = make(map[string]*Role)
 	}
 
-	group.roles[roleName][roleID] = newRole
+	if existing, exists := group.roles[roleName][roleID]; exists {
+		if existing.Revision != revision {
+			klog.Warningf("AddRole: role %s/%s already exists with revision %s, but got revision %s; skipping",
+				roleName, roleID, existing.Revision, revision)
+		}
+	} else {
+		group.roles[roleName][roleID] = &Role{
+			Name:     roleID,
+			Status:   RoleCreating,
+			Revision: revision,
+		}
+	}
 }
 
 // AddRunningPodToServingGroup add ServingGroup in runningPodOfServingGroup map

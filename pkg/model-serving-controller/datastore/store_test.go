@@ -296,10 +296,10 @@ func TestAddRole(t *testing.T) {
 	_, exists3 := s.servingGroup[key]["group0"].roles["decode"]["decode-0"]
 	assert.True(t, exists3, "role with different label should be created")
 
-	// 4. Overwrite existing role
+	// 4. Add existing role with different revision — should NOT overwrite
 	s.AddRole(key, "group0", "prefill", "prefill-0", "revision4")
 	role4 := s.servingGroup[key]["group0"].roles["prefill"]["prefill-0"]
-	assert.Equal(t, "revision4", role4.Revision, "role should be overwritten")
+	assert.Equal(t, "revision1", role4.Revision, "existing role should not be overwritten")
 }
 
 func TestGetServingGroupByModelServingSortingByIndex(t *testing.T) {
