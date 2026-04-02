@@ -20,7 +20,7 @@ from kthena.downloader.downloader import download_model
 from kthena.downloader.modelscope_downloader import ModelScopeDownloader
 
 
-class TestDownloadModelModelScope(unittest.TestCase):
+class TestDownloadModel(unittest.TestCase):
     def setUp(self):
         self.source = "ms://Qwen/Qwen2.5-7B-Instruct"
         self.output_dir = "/tmp/models"
