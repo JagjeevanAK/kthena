@@ -19,6 +19,7 @@ package connectors
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -41,14 +42,16 @@ const ConnectorTypeSGLang v1alpha1.KVConnectorType = "sglang"
 //
 // SGLang requires a bootstrap_room (unique integer) in both the prefill and
 // decode requests to coordinate the KV-cache handoff, and bootstrap_host
-// (decode pod IP) in the prefill request so the prefill server knows where to
-// push the KV cache.  See:
+// (prefill pod IP) in the decode request so the decode server knows where to
+// pull the KV cache.  See:
 //
 //	https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler.py
 type SGLangConnector struct {
-	prefillRequest *http.Request
-	decodeRequest  *http.Request
-	bootstrapRoom  int64
+	prefillRequest  *http.Request
+	decodeRequest   *http.Request
+	bootstrapRoom   int64
+	lastPrefillAddr string
+	lastDecodeAddr  string
 }
 
 // NewSGLangConnector creates a new SGLang connector with a unique bootstrap room id.
@@ -101,22 +104,30 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	// Build the decode request first (before preparePrefillBody mutates reqBody).
 	// bootstrap_host = prefillHost so the decode receiver can find the prefill's
 	// bootstrap server and exchange ZMQ metadata.
-	if s.decodeRequest == nil {
+	if s.decodeRequest == nil || s.lastDecodeAddr != decodeAddr || s.lastPrefillAddr != prefillAddr {
 		decodeBody := cloneReqBody(reqBody)
 		decodeBody = addTokenUsage(c, decodeBody)
 		decodeBody["bootstrap_room"] = s.bootstrapRoom
 		decodeBody["bootstrap_host"] = prefillHost
-		s.decodeRequest = s.buildDecodeRequest(c, decodeBody)
+		s.decodeRequest, err = buildRequest(c.Request, decodeBody)
+		if err != nil {
+			return http.StatusInternalServerError, err
+		}
+		s.lastDecodeAddr = decodeAddr
 	}
 
 	// Build the prefill request: strip streaming, cap max_tokens, add bootstrap_room.
 	// The prefill sender uses bootstrap_room to track the ZMQ metadata sent by the
 	// decode receiver; it does not need bootstrap_host.
-	if s.prefillRequest == nil {
+	if s.prefillRequest == nil || s.lastPrefillAddr != prefillAddr {
 		prefillBody := cloneReqBody(reqBody)
 		preparePrefillBody(prefillBody)
 		prefillBody["bootstrap_room"] = s.bootstrapRoom
-		s.prefillRequest = s.buildPrefillRequest(req, prefillBody)
+		s.prefillRequest, err = buildRequest(req, prefillBody)
+		if err != nil {
+			return http.StatusInternalServerError, err
+		}
+		s.lastPrefillAddr = prefillAddr
 	}
 
 	// --- Launch prefill and decode concurrently ---
@@ -162,6 +173,7 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 
 	if po.err != nil {
 		klog.Errorf("sglang prefill error (bootstrap_room=%d): %v", s.bootstrapRoom, po.err)
+		return http.StatusInternalServerError, po.err
 	}
 
 	return result, decodeErr
@@ -181,28 +193,14 @@ func (s *SGLangConnector) decode(c *gin.Context, req *http.Request, decodeAddr s
 	return decoderProxy(c, req)
 }
 
-func (s *SGLangConnector) buildPrefillRequest(req *http.Request, reqBody map[string]interface{}) *http.Request {
+func buildRequest(req *http.Request, reqBody map[string]interface{}) (*http.Request, error) {
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		klog.Errorf("sglang: failed to marshal prefill request body: %v", err)
-		return nil
+		return nil, fmt.Errorf("sglang: failed to marshal request body: %w", err)
 	}
 	reqCopy := req.Clone(req.Context())
 	reqCopy.URL.Scheme = "http"
 	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
 	reqCopy.ContentLength = int64(len(body))
-	return reqCopy
-}
-
-func (s *SGLangConnector) buildDecodeRequest(c *gin.Context, reqBody map[string]interface{}) *http.Request {
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		klog.Errorf("sglang: failed to marshal decode request body: %v", err)
-		return nil
-	}
-	reqCopy := c.Request.Clone(c.Request.Context())
-	reqCopy.URL.Scheme = "http"
-	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
-	reqCopy.ContentLength = int64(len(body))
-	return reqCopy
+	return reqCopy, nil
 }
