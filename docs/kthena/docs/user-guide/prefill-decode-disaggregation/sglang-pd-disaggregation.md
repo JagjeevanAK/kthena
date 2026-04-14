@@ -21,7 +21,12 @@ When using the ModelServing approach, you need to manually create the following 
 
 The `ModelServing` resource defines two roles: `prefill` and `decode`. Each role runs a separate SGLang server with the corresponding `--disaggregation-mode` flag, using Mooncake as the KV-transfer backend.
 
-```yaml
+:::note
+Replace `<YOUR_HF_TOKEN>` with your actual Hugging Face token before applying.
+:::
+
+```sh
+kubectl apply -f - <<'EOF'
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:
@@ -32,7 +37,6 @@ spec:
   replicas: 1
   template:
     roles:
-      # ── Prefill ──────────────────────────────────────────
       - name: prefill
         replicas: 1
         entryTemplate:
@@ -59,7 +63,7 @@ spec:
                       fieldRef:
                         fieldPath: status.podIP
                   - name: HF_TOKEN
-                    value: <>
+                    value: <YOUR_HF_TOKEN>
                 ports:
                   - containerPort: 30000
                     name: http
@@ -95,8 +99,6 @@ spec:
                   path: /root/.cache/huggingface
                   type: DirectoryOrCreate
         workerReplicas: 0
-
-      # ── Decode ───────────────────────────────────────────
       - name: decode
         replicas: 1
         entryTemplate:
@@ -123,7 +125,7 @@ spec:
                       fieldRef:
                         fieldPath: status.podIP
                   - name: HF_TOKEN
-                    value: <>
+                    value: <YOUR_HF_TOKEN>
                 ports:
                   - containerPort: 30000
                     name: http
@@ -159,19 +161,15 @@ spec:
                   path: /root/.cache/huggingface
                   type: DirectoryOrCreate
         workerReplicas: 0
-```
-
-Apply the configuration:
-
-```sh
-kubectl apply -f examples/model-serving/sglang-pd-disaggregation.yaml
+EOF
 ```
 
 ### 2. ModelServer Configuration
 
 The `ModelServer` resource configures the networking layer. The `pdGroup` field tells Kthena how to identify prefill and decode pods so that it can perform PD-aware routing.
 
-```yaml
+```sh
+kubectl apply -f - <<'EOF'
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelServer
 metadata:
@@ -193,19 +191,15 @@ spec:
   inferenceEngine: "SGLang"
   trafficPolicy:
     timeout: 10s
-```
-
-Apply the configuration:
-
-```sh
-kubectl apply -f examples/kthena-router/modelserver-pd-disaggregation.yaml
+EOF
 ```
 
 ### 3. ModelRoute Configuration
 
 The `ModelRoute` resource routes incoming requests by model name to the `ModelServer` created above.
 
-```yaml
+```sh
+kubectl apply -f - <<'EOF'
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelRoute
 metadata:
@@ -217,22 +211,7 @@ spec:
     - name: "default"
       targetModels:
         - modelServerName: "sglang-qwen-06b"
-```
-
-Apply the configuration:
-
-```sh
-kubectl apply -f examples/kthena-router/modelroute-pd-disaggregation.yaml
-```
-
-### Apply All Resources
-
-You can create all resources in the correct order with:
-
-```sh
-kubectl apply -f examples/model-serving/sglang-pd-disaggregation.yaml
-kubectl apply -f examples/kthena-router/modelserver-pd-disaggregation.yaml
-kubectl apply -f examples/kthena-router/modelroute-pd-disaggregation.yaml
+EOF
 ```
 
 ## Verification
