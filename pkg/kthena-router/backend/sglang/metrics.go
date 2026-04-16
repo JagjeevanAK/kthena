@@ -56,10 +56,6 @@ var (
 	}
 )
 
-type Model = vllm.Model
-
-type ModelList = vllm.ModelList
-
 type sglangEngine struct {
 	// The address of sglang's query metrics is http://{model server}:MetricPort/metrics
 	// Default is 30000
