@@ -30,6 +30,9 @@ import (
 func TestWebhook(t *testing.T) {
 	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
+	// waiting for webhook to be ready before running tests
+	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)
+
 	testCases := []struct {
 		name          string
 		resource      metav1.Object

@@ -18,8 +18,10 @@ package datastore
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,6 +42,31 @@ import (
 // ptr is a helper function to get pointer to a value
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func TestCreateFairnessQueueConfig_RejectsInvalidWeights(t *testing.T) {
+	t.Setenv("FAIRNESS_PRIORITY_TOKEN_WEIGHT", "NaN")
+	t.Setenv("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", strconv.FormatFloat(math.Inf(1), 'f', -1, 64))
+
+	cfg := createFairnessQueueConfig()
+	defaultCfg := DefaultFairnessQueueConfig()
+
+	if cfg.TokenWeight != defaultCfg.TokenWeight {
+		t.Fatalf("Expected default token weight %v, got %v", defaultCfg.TokenWeight, cfg.TokenWeight)
+	}
+	if cfg.RequestNumWeight != defaultCfg.RequestNumWeight {
+		t.Fatalf("Expected default request weight %v, got %v", defaultCfg.RequestNumWeight, cfg.RequestNumWeight)
+	}
+
+	t.Setenv("FAIRNESS_PRIORITY_TOKEN_WEIGHT", "-1")
+	t.Setenv("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", "-2")
+	cfg = createFairnessQueueConfig()
+	if cfg.TokenWeight != defaultCfg.TokenWeight {
+		t.Fatalf("Expected default token weight for negative alpha, got %v", cfg.TokenWeight)
+	}
+	if cfg.RequestNumWeight != defaultCfg.RequestNumWeight {
+		t.Fatalf("Expected default request weight for negative beta, got %v", cfg.RequestNumWeight)
+	}
 }
 
 func Test_updateHistogramMetrics(t *testing.T) {
@@ -1229,6 +1256,185 @@ func TestStoreMatchModelServer(t *testing.T) {
 			expectedError:  false,
 		},
 		{
+			name: "duplicate model route - prefer prebuilt (oldest) ModelRoute",
+			setupStore: func() *store {
+				s := &store{
+					routeInfo:  make(map[string]*modelRouteInfo),
+					routes:     make(map[string][]*aiv1alpha1.ModelRoute),
+					loraRoutes: make(map[string][]*aiv1alpha1.ModelRoute),
+				}
+				// Prebuilt route (older CreationTimestamp)
+				prebuilt := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "prebuilt-route",
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{
+										ModelServerName: "prebuilt-server",
+										Weight:          ptr(uint32(100)),
+									},
+								},
+							},
+						},
+					},
+				}
+				// Newer duplicate route (newer CreationTimestamp) - should be ignored in favor of prebuilt
+				newer := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "newer-route",
+						CreationTimestamp: metav1.NewTime(time.Now()),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{
+										ModelServerName: "newer-server",
+										Weight:          ptr(uint32(100)),
+									},
+								},
+							},
+						},
+					},
+				}
+				// Add newer first then prebuilt to verify sort order (CreationTimestamp) wins over add order
+				s.AddOrUpdateModelRoute(newer)
+				s.AddOrUpdateModelRoute(prebuilt)
+				return s
+			},
+			modelName:      "llama2-7b",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "prebuilt-server"},
+			expectedIsLora: false,
+			expectedError:  false,
+		},
+		{
+			name: "duplicate model route - same CreationTimestamp, resourceVersion tie-break prefers older",
+			setupStore: func() *store {
+				s := &store{
+					routeInfo:  make(map[string]*modelRouteInfo),
+					routes:     make(map[string][]*aiv1alpha1.ModelRoute),
+					loraRoutes: make(map[string][]*aiv1alpha1.ModelRoute),
+				}
+				baseTime := time.Now()
+				// Older route (smaller resourceVersion = earlier in etcd)
+				older := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "z-older-route",
+						CreationTimestamp: metav1.NewTime(baseTime),
+						ResourceVersion:   "10",
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{ModelServerName: "older-server", Weight: ptr(uint32(100))},
+								},
+							},
+						},
+					},
+				}
+				// Newer route (larger resourceVersion, created in same second)
+				newer := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "a-newer-route",
+						CreationTimestamp: metav1.NewTime(baseTime),
+						ResourceVersion:   "11",
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{ModelServerName: "newer-server", Weight: ptr(uint32(100))},
+								},
+							},
+						},
+					},
+				}
+				// Add newer first - lexicographic name would wrongly prefer a-newer-route; resourceVersion ensures z-older-route wins
+				s.AddOrUpdateModelRoute(newer)
+				s.AddOrUpdateModelRoute(older)
+				return s
+			},
+			modelName:      "llama2-7b",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "older-server"},
+			expectedIsLora: false,
+			expectedError:  false,
+		},
+		{
+			name: "duplicate model route - newer takes over after prebuilt deleted",
+			setupStore: func() *store {
+				s := &store{
+					routeInfo:  make(map[string]*modelRouteInfo),
+					routes:     make(map[string][]*aiv1alpha1.ModelRoute),
+					loraRoutes: make(map[string][]*aiv1alpha1.ModelRoute),
+				}
+				prebuilt := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "prebuilt-route",
+						CreationTimestamp: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{ModelServerName: "prebuilt-server", Weight: ptr(uint32(100))},
+								},
+							},
+						},
+					},
+				}
+				newer := &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace:         "default",
+						Name:              "newer-route",
+						CreationTimestamp: metav1.NewTime(time.Now()),
+					},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: "llama2-7b",
+						Rules: []*aiv1alpha1.Rule{
+							{
+								Name: "default-rule",
+								TargetModels: []*aiv1alpha1.TargetModel{
+									{ModelServerName: "newer-server", Weight: ptr(uint32(100))},
+								},
+							},
+						},
+					},
+				}
+				s.AddOrUpdateModelRoute(prebuilt)
+				s.AddOrUpdateModelRoute(newer)
+				// Delete prebuilt - newer should take over
+				s.DeleteModelRoute("default/prebuilt-route")
+				return s
+			},
+			modelName:      "llama2-7b",
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "newer-server"},
+			expectedIsLora: false,
+			expectedError:  false,
+		},
+		{
 			name: "no matching route",
 			setupStore: func() *store {
 				return &store{
@@ -1538,4 +1744,159 @@ func TestAddOrUpdatePod_ModelServerChangePreservesMetrics(t *testing.T) {
 
 	models := podInfo.GetModels()
 	assert.True(t, models.Contains("model-a"), "model lost during model server reassignment")
+}
+
+func TestSelectDestination_EmptyTargets(t *testing.T) {
+	// This test verifies the fix for the panic when TargetModels is empty.
+	// Before the fix, toWeightedSlice would panic with index out of range [0] with length 0.
+	targets := []*aiv1alpha1.TargetModel{}
+	s := &store{}
+	_, err := s.selectDestination(targets)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no target models specified in rule")
+}
+
+func TestToWeightedSlice_SingleTarget(t *testing.T) {
+	weight := uint32(100)
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a", Weight: &weight},
+	}
+	result, err := toWeightedSlice(targets)
+	assert.NoError(t, err)
+	assert.Equal(t, []uint32{100}, result)
+}
+
+func TestToWeightedSlice_MultipleTargets(t *testing.T) {
+	w1 := uint32(70)
+	w2 := uint32(30)
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a", Weight: &w1},
+		{ModelServerName: "server-b", Weight: &w2},
+	}
+	result, err := toWeightedSlice(targets)
+	assert.NoError(t, err)
+	assert.Equal(t, []uint32{70, 30}, result)
+}
+
+func TestToWeightedSlice_NoWeights(t *testing.T) {
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a"},
+		{ModelServerName: "server-b"},
+	}
+	result, err := toWeightedSlice(targets)
+	assert.NoError(t, err)
+	assert.Equal(t, []uint32{1, 1}, result)
+}
+
+func TestToWeightedSlice_MixedWeights(t *testing.T) {
+	w1 := uint32(50)
+	targets := []*aiv1alpha1.TargetModel{
+		{ModelServerName: "server-a", Weight: &w1},
+		{ModelServerName: "server-b"}, // no weight
+	}
+	_, err := toWeightedSlice(targets)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "weight field in targetModel must be either fully specified or not specified")
+}
+
+func TestSelectFromWeightedSlice_EmptyWeights(t *testing.T) {
+	_, err := selectFromWeightedSlice([]uint32{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no weights provided")
+}
+
+func TestSelectFromWeightedSlice_ZeroTotalWeight(t *testing.T) {
+	// This test verifies the fix for the panic when all weights are zero.
+	// Before the fix, rng.Intn(0) would panic.
+	_, err := selectFromWeightedSlice([]uint32{0, 0, 0})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "total weight is zero")
+}
+
+func TestSelectFromWeightedSlice_ValidWeights(t *testing.T) {
+	// Run multiple times to verify no panics and results are within range
+	for i := 0; i < 100; i++ {
+		idx, err := selectFromWeightedSlice([]uint32{50, 30, 20})
+		assert.NoError(t, err)
+		assert.True(t, idx >= 0 && idx < 3, "index should be in range [0, 3)")
+	}
+}
+
+func TestMatchModelServer_EmptyTargetModels_NoPanic(t *testing.T) {
+	// This is the end-to-end test for the bug: a ModelRoute with a rule
+	// that has empty TargetModels should return an error, not panic.
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+	}
+
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "broken-route",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "my-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					Name:         "catch-all",
+					TargetModels: []*aiv1alpha1.TargetModel{}, // empty — the bug trigger
+				},
+			},
+		},
+	}
+	s.AddOrUpdateModelRoute(mr)
+
+	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
+
+	// Before the fix this would panic. After the fix it returns an error.
+	assert.NotPanics(t, func() {
+		_, _, _, err := s.MatchModelServer("my-model", req, "")
+		assert.Error(t, err)
+	})
+}
+
+func TestMatchModelServer_EmptyTargetModels_FallsThrough(t *testing.T) {
+	// When the first rule has empty TargetModels but a second rule is valid,
+	// the request should fall through to the second rule.
+	s := &store{
+		routeInfo:          make(map[string]*modelRouteInfo),
+		routes:             make(map[string][]*aiv1alpha1.ModelRoute),
+		loraRoutes:         make(map[string][]*aiv1alpha1.ModelRoute),
+		gatewayModelRoutes: make(map[string]sets.Set[string]),
+	}
+
+	w := uint32(100)
+	mr := &aiv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "route-with-fallback",
+		},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "my-model",
+			Rules: []*aiv1alpha1.Rule{
+				{
+					Name: "broken-rule",
+					ModelMatch: &aiv1alpha1.ModelMatch{
+						Uri: &aiv1alpha1.StringMatch{Exact: ptr("/v1/broken")},
+					},
+					TargetModels: []*aiv1alpha1.TargetModel{}, // empty
+				},
+				{
+					Name: "valid-rule",
+					TargetModels: []*aiv1alpha1.TargetModel{
+						{ModelServerName: "good-server", Weight: &w},
+					},
+				},
+			},
+		},
+	}
+	s.AddOrUpdateModelRoute(mr)
+
+	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
+	server, _, _, err := s.MatchModelServer("my-model", req, "")
+	assert.NoError(t, err)
+	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, server)
 }

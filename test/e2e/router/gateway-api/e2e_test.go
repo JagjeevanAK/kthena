@@ -144,6 +144,12 @@ func TestModelRouteLora(t *testing.T) {
 	router.TestModelRouteLoraShared(t, testCtx, testNamespace, true, kthenaNamespace)
 }
 
+// TestModelRouteDuplicatePreferOldest tests that duplicate ModelRoutes for the same model
+// are evaluated oldest-first and the first match wins; after the oldest is deleted, the newer takes over.
+func TestModelRouteDuplicatePreferOldest(t *testing.T) {
+	router.TestModelRouteDuplicatePreferOldestShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}
+
 // TestMetrics tests router metrics collection.
 // This test runs the shared test function with Gateway API enabled (with ParentRefs).
 func TestMetrics(t *testing.T) {
@@ -154,6 +160,12 @@ func TestMetrics(t *testing.T) {
 // This test runs the shared test function with Gateway API enabled (with ParentRefs).
 func TestRateLimitMetrics(t *testing.T) {
 	router.TestRateLimitMetricsShared(t, testCtx, testNamespace, true, kthenaNamespace)
+}
+
+// TestSglangMetrics verifies that the runtime can correctly scrape and parse SGLang metrics
+// from the sglang-mock deployment.
+func TestSglangMetrics(t *testing.T) {
+	router.TestSglangMetricsShared(t, testCtx, testNamespace)
 }
 
 // TestDuplicateModelName tests that the same modelName can route to different backend models

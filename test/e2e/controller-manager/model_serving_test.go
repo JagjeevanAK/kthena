@@ -40,7 +40,10 @@ import (
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
 
-const nginxImage = "nginx:1.28.2"
+const (
+	nginxImage       = "nginx:1.28.2"
+	nginxAlpineImage = "nginx:alpine"
+)
 
 // TestModelServingLifecycle verifies the full lifecycle of a ModelServing resource:
 // Create -> Verify Ready -> Update (change image) -> Verify Updated -> Delete -> Verify Deleted.
@@ -48,7 +51,7 @@ func TestModelServingLifecycle(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Phase 1: Create
-	modelServing := createBasicModelServing("test-lifecycle", 1)
+	modelServing := createBasicModelServing("test-lifecycle", 1, 0)
 
 	t.Log("Phase 1: Creating ModelServing")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -70,9 +73,9 @@ func TestModelServingLifecycle(t *testing.T) {
 	require.NoError(t, err, "Failed to get ModelServing for update")
 
 	updatedMS := currentMS.DeepCopy()
-	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
 
-	t.Log("Phase 2: Updating ModelServing (changing image to nginx:alpine)")
+	t.Logf("Phase 2: Updating ModelServing (changing image to %s)", nginxAlpineImage)
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
 	require.NoError(t, err, "Failed to update ModelServing")
 
@@ -96,7 +99,7 @@ func TestModelServingLifecycle(t *testing.T) {
 			}
 			hasUpdatedImage := false
 			for _, container := range pod.Spec.Containers {
-				if container.Name == "test-container" && container.Image == "nginx:alpine" {
+				if container.Name == "test-container" && container.Image == nginxAlpineImage {
 					hasUpdatedImage = true
 					break
 				}
@@ -106,7 +109,7 @@ func TestModelServingLifecycle(t *testing.T) {
 			}
 		}
 		return true
-	}, 3*time.Minute, 5*time.Second, "Not all pods were updated to nginx:alpine")
+	}, 3*time.Minute, 5*time.Second, fmt.Sprintf("Not all pods were updated to %s", nginxAlpineImage))
 	t.Log("Phase 2 passed: ModelServing updated successfully")
 
 	// Phase 3: Delete
@@ -143,7 +146,7 @@ func TestModelServingScaleUp(t *testing.T) {
 	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing with 1 replica
-	modelServing := createBasicModelServing("test-scale-up", 1)
+	modelServing := createBasicModelServing("test-scale-up", 1, 0)
 
 	t.Log("Creating ModelServing with 1 servingGroup replica")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -182,7 +185,7 @@ func TestModelServingScaleDown(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing with 3 replicas
-	modelServing := createBasicModelServing("test-scale-down", 3)
+	modelServing := createBasicModelServing("test-scale-down", 3, 0)
 
 	t.Log("Creating ModelServing with 3 servingGroup replicas")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -230,27 +233,7 @@ func TestModelServingRoleScaleUp(t *testing.T) {
 
 	// Create a ModelServing with 1 servingGroup and a prefill role with 1 replica
 	initialRoleReplicas := int32(1)
-	modelServing := createBasicModelServing("test-role-scale-up", 1, workload.Role{
-		Name:     "prefill",
-		Replicas: &initialRoleReplicas,
-		EntryTemplate: workload.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "test-container",
-						Image: "nginx:latest",
-						Ports: []corev1.ContainerPort{
-							{
-								Name:          "http",
-								ContainerPort: 80,
-							},
-						},
-					},
-				},
-			},
-		},
-		WorkerReplicas: 0,
-	})
+	modelServing := createBasicModelServing("test-role-scale-up", 1, initialRoleReplicas)
 
 	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 1 replica")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -283,27 +266,7 @@ func TestModelServingRoleScaleDown(t *testing.T) {
 
 	// Create a ModelServing with 1 servingGroup and a prefill role with 3 replicas
 	initialRoleReplicas := int32(3)
-	modelServing := createBasicModelServing("test-role-scale-down", 1, workload.Role{
-		Name:     "prefill",
-		Replicas: &initialRoleReplicas,
-		EntryTemplate: workload.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "test-container",
-						Image: "nginx:latest",
-						Ports: []corev1.ContainerPort{
-							{
-								Name:          "http",
-								ContainerPort: 80,
-							},
-						},
-					},
-				},
-			},
-		},
-		WorkerReplicas: 0,
-	})
+	modelServing := createBasicModelServing("test-role-scale-down", 1, initialRoleReplicas)
 
 	t.Log("Creating ModelServing with 1 servingGroup, prefill role with 3 replicas")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -341,8 +304,11 @@ func TestModelServingServingGroupRecreate(t *testing.T) {
 	// Create a ModelServing with ServingGroupRecreate policy and 2 roles
 	prefillRole := createRole("prefill", 1, 0)
 	decodeRole := createRole("decode", 1, 0)
-	modelServing := createBasicModelServing("test-sg-recreate", 1, prefillRole, decodeRole)
+	modelServing := createBasicModelServing("test-sg-recreate", 1, 0, prefillRole, decodeRole)
 	modelServing.Spec.RecoveryPolicy = workload.ServingGroupRecreate
+	modelServing.Spec.RolloutStrategy = &workload.RolloutStrategy{
+		Type: workload.ServingGroupRollingUpdate,
+	}
 
 	t.Log("Creating ModelServing with ServingGroupRecreate policy and 2 roles (prefill + decode)")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -412,7 +378,7 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 	// Create a ModelServing with 3 servingGroup replicas and a WorkerTemplate
 	// so that headless services are actually created by the controller.
 	workerRole := createRole("prefill", 1, 1)
-	modelServing := createBasicModelServing("test-svc-sg-delete", 3, workerRole)
+	modelServing := createBasicModelServing("test-svc-sg-delete", 3, 0, workerRole)
 
 	t.Log("Creating ModelServing with 3 servingGroup replicas and WorkerTemplate")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -489,8 +455,11 @@ func TestModelServingPodRecovery(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a basic ModelServing
-	modelServing := createBasicModelServing("test-pod-recovery", 1)
+	modelServing := createBasicModelServing("test-pod-recovery", 1, 0)
 	modelServing.Spec.RecoveryPolicy = workload.RoleRecreate
+	modelServing.Spec.RolloutStrategy = &workload.RolloutStrategy{
+		Type: workload.RoleRollingUpdate,
+	}
 
 	t.Log("Creating ModelServing for pod recovery test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -552,7 +521,7 @@ func TestModelServingServiceRecovery(t *testing.T) {
 
 	// Create a ModelServing with a WorkerTemplate so that headless services are created
 	workerRole := createRole("prefill", 1, 1)
-	modelServing := createBasicModelServing("test-service-recovery", 1, workerRole)
+	modelServing := createBasicModelServing("test-service-recovery", 1, 0, workerRole)
 
 	t.Log("Creating ModelServing for service recovery test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -638,7 +607,7 @@ func TestModelServingWithDuplicateHostAliases(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a ModelServing with duplicate IP hostAliases
-	modelServing := createBasicModelServing("test-duplicate-hostaliases", 1)
+	modelServing := createBasicModelServing("test-duplicate-hostaliases", 1, 0)
 	modelServing.Spec.Template.Roles[0].EntryTemplate.Spec.HostAliases = []corev1.HostAlias{
 		{
 			IP:        "10.1.2.3",
@@ -718,49 +687,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 
 	// Create a ModelServing with 4 replicas and maxUnavailable set to 2
 	replicas := int32(4)
-	modelServing := &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-rolling-update-maxunavailable",
-			Namespace: testNamespace,
-		},
-		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
-			RolloutStrategy: &workload.RolloutStrategy{
-				Type: workload.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					MaxUnavailable: &intstr.IntOrString{
-						IntVal: 2, // maxUnavailable = 2
-					},
-				},
-			},
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
-					{
-						Name:     "prefill",
-						Replicas: &replicas,
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: nginxImage, // Initial image
-										Ports: []corev1.ContainerPort{
-											{
-												Name:          "http",
-												ContainerPort: 80,
-											},
-										},
-									},
-								},
-							},
-						},
-						WorkerReplicas: 0,
-					},
-				},
-			},
-		},
-	}
-
+	modelServing := createBasicModelServing("test-rolling-update-maxunavailable", replicas, replicas)
 	t.Log("Creating ModelServing with 4 replicas and maxUnavailable=2")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
@@ -772,7 +699,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	// Update the ModelServing to trigger a rolling update (change image)
 	updatedMS := initialMS.DeepCopy()
 	// Modify the container image to trigger a rolling update
-	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+	updatedMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
 
 	t.Log("Updating ModelServing to trigger rolling update with maxUnavailable=2")
 	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
@@ -831,7 +758,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get final ModelServing")
 	assert.Equal(t, int32(4), *finalMS.Spec.Replicas, "Final ModelServing should have 4 replicas in spec")
-	assert.Equal(t, "nginx:alpine", finalMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image, "Final ModelServing should have updated image")
+	assert.Equal(t, nginxAlpineImage, finalMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image, "Final ModelServing should have updated image")
 
 	// Verify that maxUnavailable was never exceeded during the update
 	assert.True(t, maxObservedUnavailable <= 2, "Max unavailable replicas (%d) exceeded maxUnavailable limit (2)", maxObservedUnavailable)
@@ -850,7 +777,7 @@ func TestModelServingRoleStatusEvents(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
 	// Create a simple ModelServing with a single role replica to keep the signal clean.
-	modelServing := createBasicModelServing("test-role-status-events", 1)
+	modelServing := createBasicModelServing("test-role-status-events", 1, 0)
 
 	t.Log("Creating ModelServing for role status events test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -978,10 +905,17 @@ func createRole(name string, roleReplicas, workerReplicas int32) workload.Role {
 	}
 }
 
-func createBasicModelServing(name string, servingGroupReplicas int32, roles ...workload.Role) *workload.ModelServing {
+func getWorkloadRoleReplicas(workloadRoleReplicas int32) int32 {
+	if workloadRoleReplicas == 0 {
+		return int32(1)
+	}
+	return workloadRoleReplicas
+}
+
+func createBasicModelServing(name string, servingGroupReplicas, workloadRoleReplicas int32, roles ...workload.Role) *workload.ModelServing {
 	// If no roles are provided, create a default role
 	if len(roles) == 0 {
-		defaultRoleReplicas := int32(1)
+		defaultRoleReplicas := getWorkloadRoleReplicas(workloadRoleReplicas)
 		roles = []workload.Role{
 			{
 				Name:     "prefill",
@@ -1014,6 +948,14 @@ func createBasicModelServing(name string, servingGroupReplicas int32, roles ...w
 		},
 		Spec: workload.ModelServingSpec{
 			Replicas: &servingGroupReplicas,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+					MaxUnavailable: &intstr.IntOrString{
+						IntVal: 2, // maxUnavailable = 2
+					},
+				},
+			},
 			Template: workload.ServingGroup{
 				Roles: roles,
 			},
@@ -1059,49 +1001,7 @@ func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 
 	// Create a ModelServing with 6 replicas and maxUnavailable set to 2
 	replicas := int32(6)
-	modelServing := &workload.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-rolling-update-bad-image",
-			Namespace: testNamespace,
-		},
-		Spec: workload.ModelServingSpec{
-			Replicas: &replicas,
-			RolloutStrategy: &workload.RolloutStrategy{
-				Type: workload.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					MaxUnavailable: &intstr.IntOrString{
-						IntVal: 2,
-					},
-				},
-			},
-			Template: workload.ServingGroup{
-				Roles: []workload.Role{
-					{
-						Name:     "prefill",
-						Replicas: ptr.To[int32](1),
-						EntryTemplate: workload.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: nginxImage,
-										Ports: []corev1.ContainerPort{
-											{
-												Name:          "http",
-												ContainerPort: 80,
-											},
-										},
-									},
-								},
-							},
-						},
-						WorkerReplicas: 0,
-					},
-				},
-			},
-		},
-	}
-
+	modelServing := createBasicModelServing("test-rolling-update-bad-image", replicas, 0)
 	t.Log("Creating ModelServing with 6 replicas and maxUnavailable=2")
 	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
@@ -1346,7 +1246,7 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	// 5 serving groups × (3 pods for prefill + 2 pods for decode) = 25 pods total
 	prefillRole := createRole("prefill", 1, 2)
 	decodeRole := createRole("decode", 1, 1)
-	modelServing := createBasicModelServing("test-controller-restart", 5, prefillRole, decodeRole)
+	modelServing := createBasicModelServing("test-controller-restart", 5, 0, prefillRole, decodeRole)
 
 	t.Log("Creating complicated ModelServing with 5 serving groups and 2 roles (25 total pods expected)")
 	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
@@ -1434,4 +1334,197 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	assert.Equal(t, actualPodCount, runningPods, "All created pods should be in Running phase")
 
 	t.Log("ModelServing controller-manager restart test passed successfully")
+}
+
+// TestModelServingRoleBasedRollingUpdate verifies that role-based rolling updates work correctly
+// by updating individual roles without recreating the entire ServingGroup
+func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	// Create a ModelServing with 2 replicas and 2 roles
+	replicas := int32(2)
+	modelServing := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-role-based-rolling-update",
+			Namespace: testNamespace,
+		},
+		Spec: workload.ModelServingSpec{
+			Replicas:       &replicas,
+			RecoveryPolicy: workload.RoleRecreate,
+			RolloutStrategy: &workload.RolloutStrategy{
+				Type: workload.RoleRollingUpdate, // Using role-based rolling update
+			},
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:     "prefill",
+						Replicas: ptr.To[int32](2), // Each ServingGroup has 2 prefill pods
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: nginxImage, // Initial image
+										Ports: []corev1.ContainerPort{
+											{
+												Name:          "http",
+												ContainerPort: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+					{
+						Name:     "decode",
+						Replicas: ptr.To[int32](1), // Each ServingGroup has 1 decode pod
+						EntryTemplate: workload.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: nginxImage, // Initial image
+										Ports: []corev1.ContainerPort{
+											{
+												Name:          "http",
+												ContainerPort: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+						WorkerReplicas: 0,
+					},
+				},
+			},
+		},
+	}
+
+	// waiting for webhook to be ready before running tests
+	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)
+
+	// Create the ModelServing
+	t.Log("Creating ModelServing with 2 replicas and 2 roles for role-based rolling update test")
+	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+
+	// Register cleanup for ModelServing
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelServing: %s/%s", modelServing.Namespace, modelServing.Name)
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelServing %s/%s: %v", modelServing.Namespace, modelServing.Name, err)
+		}
+	})
+
+	// Wait for the initial ModelServing to be ready
+	t.Log("Waiting for initial ModelServing to be ready")
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// Verify initial state
+	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get initial ModelServing")
+	assert.Equal(t, int32(2), *initialMS.Spec.Replicas, "Initial ModelServing should have 2 replicas")
+	assert.Equal(t, int32(2), initialMS.Status.AvailableReplicas, "Initial ModelServing should have 2 available replicas")
+
+	// Update the ModelServing to trigger a role-based rolling update (change prefill role image)
+	updatedMS := initialMS.DeepCopy()
+	// Modify the container image of the prefill role to trigger a rolling update
+	for i := range updatedMS.Spec.Template.Roles {
+		if updatedMS.Spec.Template.Roles[i].Name == "prefill" {
+			updatedMS.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = "nginx:alpine"
+			break
+		}
+	}
+
+	decodePodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=decode", modelServing.Name)
+	decodePodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: decodePodLabelSelector,
+	})
+	assert.NoError(t, err, "Failed to list decode pods before update")
+
+	assert.Equalf(t, 2, len(decodePodList.Items), "There should be 2 decode pods before update")
+	decodePodsUID := make(map[string]string, len(decodePodList.Items))
+	for _, pod := range decodePodList.Items {
+		decodePodsUID[pod.Name] = string(pod.UID)
+	}
+
+	t.Log("Updating ModelServing to trigger role-based rolling update (changing prefill role image)")
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Update(ctx, updatedMS, metav1.UpdateOptions{})
+	require.NoError(t, err, "Failed to update ModelServing for role-based rolling update")
+
+	// Monitor the role-based rolling update to ensure only prefill role pods are replaced
+	t.Log("Monitoring role-based rolling update to ensure only prefill role pods are replaced while decode role pods remain")
+
+	// It is possible that the ‘modelServing Ready’ check completed before the change in the modelServing status,
+	// causing subsequent checks to fail. Therefore, the checks have been retried.
+	// This has improved the robustness of the end-to-end tests.
+	require.Eventually(t, func() bool {
+		// Wait for the rolling update to complete
+		utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, updatedMS.Name)
+
+		// Get final state
+		finalMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, updatedMS.Name, metav1.GetOptions{})
+		require.NoError(t, err, "Failed to get final ModelServing")
+		assert.Equal(t, int32(2), *finalMS.Spec.Replicas, "Final ModelServing should have 2 replicas in spec")
+		assert.Equal(t, int32(2), finalMS.Status.AvailableReplicas, "Final ModelServing should have 2 available replicas after update")
+
+		// Verify that the prefill role image has been updated
+		prefillRoleUpdated := false
+		for _, role := range finalMS.Spec.Template.Roles {
+			if role.Name == "prefill" && role.EntryTemplate.Spec.Containers[0].Image == "nginx:alpine" {
+				prefillRoleUpdated = true
+				break
+			}
+		}
+		assert.True(t, prefillRoleUpdated, "Prefill role should have been updated to nginx:alpine")
+
+		prefillPodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=prefill", modelServing.Name)
+		prefillPodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: prefillPodLabelSelector,
+		})
+		if err != nil {
+			t.Logf("Failed to list prefill pods: %v", err)
+			return false
+		}
+
+		// Check if all prefill pods have the updated image
+		for _, pod := range prefillPodList.Items {
+			if pod.Spec.Containers[0].Image != "nginx:alpine" {
+				t.Logf("Prefill pod %s still has image %s, expecting nginx:alpine", pod.Name, pod.Spec.Containers[0].Image)
+				return false
+			}
+		}
+
+		// Check if all prefill pods have the updated image
+		decodePodLabelSelector := fmt.Sprintf("modelserving.volcano.sh/name=%s,modelserving.volcano.sh/role=decode", modelServing.Name)
+		decodePodList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
+			LabelSelector: decodePodLabelSelector,
+		})
+		if err != nil {
+			t.Logf("Failed to list decode pods: %v", err)
+			return false
+		}
+
+		// Check if all decode pods still have the original image
+		for _, pod := range decodePodList.Items {
+			if pod.Spec.Containers[0].Image != nginxImage {
+				t.Logf("Decode pod %s has image %s, expecting original image %s", pod.Name, pod.Spec.Containers[0].Image, nginxImage)
+				return false
+			}
+
+			uid, exist := decodePodsUID[pod.Name]
+			if !exist || string(pod.UID) != uid {
+				t.Logf("Decode pod %s has been replaced", pod.Name)
+				return false
+			}
+		}
+
+		return true
+	}, 2*time.Minute, 1*time.Second)
+
+	t.Log("ModelServing role-based rolling update test passed successfully")
 }

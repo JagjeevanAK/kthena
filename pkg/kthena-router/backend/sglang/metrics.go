@@ -94,15 +94,7 @@ func (engine *sglangEngine) GetCountMetricsInfo(allMetrics map[string]*dto.Metri
 			continue
 		}
 		for _, metric := range metricInfo.Metric {
-			var metricValue float64
-			switch metricInfo.GetType() {
-			case dto.MetricType_GAUGE:
-				metricValue = metric.GetGauge().GetValue()
-			case dto.MetricType_COUNTER:
-				metricValue = metric.GetCounter().GetValue()
-			default:
-				continue
-			}
+			metricValue := metric.GetGauge().GetValue()
 			wantMetrics[mapOfMetricsName[metricName]] = metricValue
 		}
 	}

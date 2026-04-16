@@ -32,6 +32,8 @@ import (
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
+	routerutils "github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
@@ -318,7 +320,23 @@ func TestModelRouteSimpleShared(t *testing.T, testCtx *routercontext.RouterTestC
 	messages := []utils.ChatMessage{
 		utils.NewChatMessage("user", "Hello"),
 	}
-	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+	resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+
+	// When Gateway API is enabled, ensure access log includes the Gateway key.
+	if useGatewayAPI && kthenaNamespace != "" && resp.StatusCode == 200 {
+		routerPod := utils.GetRouterPod(t, testCtx.KubeClient, kthenaNamespace)
+		expectedGateway := fmt.Sprintf("%s/%s", kthenaNamespace, "default")
+		utils.WaitForPodLogsContain(
+			t,
+			testCtx.KubeClient,
+			kthenaNamespace,
+			routerPod.Name,
+			90*time.Second,
+			[]string{" gateway=" + expectedGateway},
+			90*time.Second,
+			2*time.Second,
+		)
+	}
 }
 
 // TestModelRouteMultiModelsShared is a shared test function that can be used by both
@@ -1286,6 +1304,101 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 	t.Log("LoRA adapters unloaded successfully")
 }
 
+// TestModelRouteDuplicatePreferOldestShared verifies that when multiple ModelRoutes
+// exist for the same model name, the router evaluates them oldest-first (CreationTimestamp)
+// and the first matching route wins; after the oldest route is deleted, the next one takes over.
+func TestModelRouteDuplicatePreferOldestShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string, useGatewayAPI bool, kthenaNamespace string) {
+	ctx := context.Background()
+	const duplicateModelName = "dup-model"
+	weight100 := uint32(100)
+
+	// Create "prebuilt" route first so it gets older CreationTimestamp (oldest-first wins).
+	prebuiltRoute := &networkingv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      "prebuilt-route",
+		},
+		Spec: networkingv1alpha1.ModelRouteSpec{
+			ModelName: duplicateModelName,
+			Rules: []*networkingv1alpha1.Rule{
+				{
+					Name: "default",
+					TargetModels: []*networkingv1alpha1.TargetModel{
+						{ModelServerName: routercontext.ModelServer1_5bName, Weight: &weight100},
+					},
+				},
+			},
+		},
+	}
+	setupModelRouteWithGatewayAPI(prebuiltRoute, useGatewayAPI, kthenaNamespace)
+	createdPrebuilt, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, prebuiltRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create prebuilt ModelRoute")
+	t.Logf("Created ModelRoute: %s/%s (oldest)", createdPrebuilt.Namespace, createdPrebuilt.Name)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdPrebuilt.Name, metav1.DeleteOptions{})
+	})
+
+	// Ensure second route has strictly newer CreationTimestamp (API server uses second precision).
+	time.Sleep(2 * time.Second)
+
+	// Create "newer" route second (newer CreationTimestamp).
+	newerRoute := &networkingv1alpha1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      "newer-route",
+		},
+		Spec: networkingv1alpha1.ModelRouteSpec{
+			ModelName: duplicateModelName,
+			Rules: []*networkingv1alpha1.Rule{
+				{
+					Name: "default",
+					TargetModels: []*networkingv1alpha1.TargetModel{
+						{ModelServerName: routercontext.ModelServer7bName, Weight: &weight100},
+					},
+				},
+			},
+		},
+	}
+	setupModelRouteWithGatewayAPI(newerRoute, useGatewayAPI, kthenaNamespace)
+	createdNewer, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, newerRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create newer ModelRoute")
+	t.Logf("Created ModelRoute: %s/%s (newer)", createdNewer.Namespace, createdNewer.Name)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelRoute: %s/%s", createdNewer.Namespace, createdNewer.Name)
+		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdNewer.Name, metav1.DeleteOptions{})
+	})
+
+	messages := []utils.ChatMessage{utils.NewChatMessage("user", "Hello")}
+
+	// 1) Oldest route should win: traffic goes to 1.5B backend.
+	t.Run("PreferOldestRoute", func(t *testing.T) {
+		resp := utils.CheckChatCompletions(t, duplicateModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.Contains(t, resp.Body, "DeepSeek-R1-Distill-Qwen-1.5B", "Oldest route (prebuilt) should be used; response should be from 1.5B model")
+	})
+
+	// 2) Delete oldest route; newer route should take over (7B).
+	err = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(ctx, createdPrebuilt.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "Failed to delete prebuilt ModelRoute")
+	t.Log("Deleted prebuilt ModelRoute; expecting newer route to take over")
+
+	// Wait for router to reconcile.
+	require.Eventually(t, func() bool {
+		resp := utils.SendChatRequestWithRetry(t, utils.DefaultRouterURL, duplicateModelName, messages, nil)
+		return resp.StatusCode == 200 && strings.Contains(resp.Body, "DeepSeek-R1-Distill-Qwen-7B")
+	}, 2*time.Minute, 2*time.Second, "After deleting oldest route, requests should hit 7B model")
+
+	t.Run("NewerTakesOverAfterOldestDeleted", func(t *testing.T) {
+		resp := utils.CheckChatCompletions(t, duplicateModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.Contains(t, resp.Body, "DeepSeek-R1-Distill-Qwen-7B", "Newer route should take over after prebuilt is deleted")
+	})
+}
+
 // TestMetricsShared is a shared test function that can be used by both
 // router and gateway-api test suites. When useGatewayAPI is true, it configures ModelRoute
 // with ParentRefs to the default Gateway.
@@ -1390,6 +1503,52 @@ func TestMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, t
 			return errorDelta == 1
 		}, 15*time.Second, time.Second, "Error metric did not increment")
 	})
+}
+
+// TestSglangMetricsShared verifies that the kthena runtime can correctly scrape and parse
+// SGLang metrics from the sglang-mock deployment. It uses port-forward to access pod
+func TestSglangMetricsShared(t *testing.T, testCtx *routercontext.RouterTestContext, testNamespace string) {
+	pods := utils.ListPodsByLabel(t, testCtx.KubeClient, testNamespace, "app=sglang-mock")
+	require.NotEmpty(t, pods, "No sglang-mock pods found - ensure SetupCommonComponents deployed LLM-Mock-sglang")
+
+	// Find first running pod with PodIP
+	var targetPod *corev1.Pod
+	for i := range pods {
+		if pods[i].Status.Phase == corev1.PodRunning && pods[i].Status.PodIP != "" {
+			targetPod = &pods[i]
+			break
+		}
+	}
+	require.NotNil(t, targetPod, "No running sglang-mock pod with PodIP found")
+
+	pf, err := utils.SetupPortForwardToPod(testNamespace, targetPod.Name, "30300", "30000")
+	require.NoError(t, err, "Failed to setup port-forward to sglang-mock pod")
+	defer pf.Close()
+
+	metricsURL := "http://127.0.0.1:30300/metrics"
+	allMetrics, err := backendmetrics.ParseMetricsURL(metricsURL)
+	require.NoError(t, err, "Failed to fetch metrics from sglang-mock via port-forward")
+	require.NotEmpty(t, allMetrics, "No metrics returned from sglang-mock")
+
+	engine := sglang.NewSglangEngine()
+	countMetrics := engine.GetCountMetricsInfo(allMetrics)
+	assert.Contains(t, countMetrics, routerutils.GPUCacheUsage,
+		"Missing gpu_usage (sglang:token_usage) in count metrics")
+	assert.Contains(t, countMetrics, routerutils.RequestWaitingNum,
+		"Missing request_waiting_num (sglang:num_queue_reqs) in count metrics")
+
+	histogramMetrics, _ := engine.GetHistogramPodMetrics(allMetrics, nil)
+	assert.Contains(t, histogramMetrics, routerutils.TTFT,
+		"Missing TTFT (sglang:time_to_first_token_seconds) in histogram metrics")
+	assert.Contains(t, histogramMetrics, routerutils.TPOT,
+		"Missing TPOT (sglang:time_per_output_token_seconds) in histogram metrics")
+
+	t.Logf("Pod %s: gpu_usage=%.4f, request_waiting_num=%.0f, TTFT=%.6f, TPOT=%.6f",
+		targetPod.Name,
+		countMetrics[routerutils.GPUCacheUsage],
+		countMetrics[routerutils.RequestWaitingNum],
+		histogramMetrics[routerutils.TTFT],
+		histogramMetrics[routerutils.TPOT])
 }
 
 // TestRateLimitMetricsShared is a shared test function that can be used by both
