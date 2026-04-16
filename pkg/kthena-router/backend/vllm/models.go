@@ -35,8 +35,8 @@ type ModelList struct {
 	Data []Model `json:"data"`
 }
 
-func (engine *vllmEngine) GetPodModels(pod *corev1.Pod) ([]string, error) {
-	url := fmt.Sprintf("http://%s:%d/v1/models", pod.Status.PodIP, engine.MetricPort)
+func FetchPodModels(podIP string, port uint32) ([]string, error) {
+	url := fmt.Sprintf("http://%s:%d/v1/models", podIP, port)
 	resp, err := metrics.HTTPClient().Get(url)
 	if err != nil {
 		return nil, err
@@ -44,7 +44,7 @@ func (engine *vllmEngine) GetPodModels(pod *corev1.Pod) ([]string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get models from pod %s/%s: HTTP %d", pod.GetNamespace(), pod.GetName(), resp.StatusCode)
+		return nil, fmt.Errorf("failed to get models from pod IP %s: HTTP %d", podIP, resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -63,4 +63,8 @@ func (engine *vllmEngine) GetPodModels(pod *corev1.Pod) ([]string, error) {
 		models = append(models, model.ID)
 	}
 	return models, nil
+}
+
+func (engine *vllmEngine) GetPodModels(pod *corev1.Pod) ([]string, error) {
+	return FetchPodModels(pod.Status.PodIP, engine.MetricPort)
 }
