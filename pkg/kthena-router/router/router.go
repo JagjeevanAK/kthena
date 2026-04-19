@@ -83,9 +83,9 @@ type Router struct {
 	connectorFactory *connectors.Factory
 
 	// Fairness scheduling configuration
-	fairnessTimeout  time.Duration
-	tokenWeight      float64 // Weight for token-based priority (default 1.0)
-	requestNumWeight float64 // Weight for request-count-based priority (default 0.0)
+	fairnessTimeout   time.Duration
+	inputTokenWeight  float64 // FAIRNESS_INPUT_TOKEN_WEIGHT
+	outputTokenWeight float64 // FAIRNESS_OUTPUT_TOKEN_WEIGHT
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
@@ -154,17 +154,17 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	}
 
 	return &Router{
-		store:            store,
-		scheduler:        scheduler.NewScheduler(store, routerConfig),
-		authenticator:    auth.NewJWTAuthenticator(routerConfig),
-		loadRateLimiter:  loadRateLimiter,
-		accessLogger:     accessLogger,
-		metrics:          metricsInstance,
-		tokenizer:        tokenizerInstance,
-		connectorFactory: connectors.NewDefaultFactory(),
-		fairnessTimeout:  parseFairnessTimeout(),
-		tokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
-		requestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
+		store:             store,
+		scheduler:         scheduler.NewScheduler(store, routerConfig),
+		authenticator:     auth.NewJWTAuthenticator(routerConfig),
+		loadRateLimiter:   loadRateLimiter,
+		accessLogger:      accessLogger,
+		metrics:           metricsInstance,
+		tokenizer:         tokenizerInstance,
+		connectorFactory:  connectors.NewDefaultFactory(),
+		fairnessTimeout:   parseFairnessTimeout(),
+		inputTokenWeight:  parseEnvFloat("FAIRNESS_INPUT_TOKEN_WEIGHT", 1.0),
+		outputTokenWeight: parseEnvFloat("FAIRNESS_OUTPUT_TOKEN_WEIGHT", 2.0),
 	}
 }
 
@@ -190,13 +190,54 @@ func parseEnvFloat(key string, fallback float64) float64 {
 	return fallback
 }
 
-func (r *Router) calculateRequestPriority(userID, modelName string) float64 {
-	priority, err := datastore.CalculateFairnessPriority(r.store, userID, modelName, r.tokenWeight, r.requestNumWeight)
-	if err != nil {
-		klog.Warningf("failed to calculate fairness priority for user=%s model=%s: %v", userID, modelName, err)
+type enqueuePriorityDetails struct {
+	HistoricalUsage       float64
+	RequestedOutputTokens float64
+	EstimatedRequestCost  float64
+	FinalPriority         float64
+}
+
+func getRequestedOutputTokens(modelRequest ModelRequest) float64 {
+	if modelRequest == nil {
 		return 0
 	}
-	return priority
+
+	if v, ok := modelRequest["max_completion_tokens"]; ok {
+		return parseRequestedOutputTokenField(v)
+	}
+
+	if v, ok := modelRequest["max_tokens"]; ok {
+		return parseRequestedOutputTokenField(v)
+	}
+
+	return 0
+}
+
+func parseRequestedOutputTokenField(value interface{}) float64 {
+	numericValue, ok := value.(float64)
+	if !ok || math.IsNaN(numericValue) || math.IsInf(numericValue, 0) || numericValue < 0 {
+		return 0
+	}
+	return numericValue
+}
+
+func (r *Router) calculateRequestPriority(userID, modelName string, inputTokens int, modelRequest ModelRequest) enqueuePriorityDetails {
+	historicalUsage, err := r.store.GetTokenCount(userID, modelName)
+	if err != nil {
+		klog.Warningf("failed to get fairness usage for user=%s model=%s: %v", userID, modelName, err)
+		historicalUsage = 0
+	}
+
+	requestedOutputTokens := getRequestedOutputTokens(modelRequest)
+	estimatedRequestCost := r.inputTokenWeight*float64(inputTokens) + r.outputTokenWeight*requestedOutputTokens
+	finalPriority := historicalUsage + estimatedRequestCost
+
+	return enqueuePriorityDetails{
+		HistoricalUsage:       historicalUsage,
+		RequestedOutputTokens: requestedOutputTokens,
+		EstimatedRequestCost:  estimatedRequestCost,
+		FinalPriority:         finalPriority,
+	}
 }
 
 type ModelRequest map[string]interface{}
@@ -1035,12 +1076,30 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 	reqCtx, cancel := context.WithTimeout(c.Request.Context(), r.fairnessTimeout)
 	defer cancel()
 
-	pri := r.calculateRequestPriority(userId, modelName)
+	inputTokens := 0
+	if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
+		inputTokens = accessCtx.InputTokens
+	}
+
+	priorityDetails := r.calculateRequestPriority(userId, modelName, inputTokens, modelRequest)
+	if klog.V(4).Enabled() {
+		klog.V(4).Infof("fairness enqueue requestID=%s userID=%s model=%s historicalUsage=%f inputTokens=%d requestedOutputTokens=%f estimatedRequestCost=%f finalPriority=%f",
+			requestID,
+			userId,
+			modelName,
+			priorityDetails.HistoricalUsage,
+			inputTokens,
+			priorityDetails.RequestedOutputTokens,
+			priorityDetails.EstimatedRequestCost,
+			priorityDetails.FinalPriority,
+		)
+	}
+
 	queueReq := &datastore.Request{
 		ReqID:       requestID,
 		UserID:      userId,
 		ModelName:   modelName,
-		Priority:    pri,
+		Priority:    priorityDetails.FinalPriority,
 		RequestTime: time.Now(),
 		NotifyChan:  make(chan struct{}),
 		CancelCh:    reqCtx.Done(),
