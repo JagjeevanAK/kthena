@@ -89,6 +89,20 @@ func TestGetRequestedOutputTokens(t *testing.T) {
 			expected: 32,
 		},
 		{
+			name: "supports int output budget",
+			request: ModelRequest{
+				"max_tokens": 48,
+			},
+			expected: 48,
+		},
+		{
+			name: "supports int64 output budget",
+			request: ModelRequest{
+				"max_completion_tokens": int64(64),
+			},
+			expected: 64,
+		},
+		{
 			name: "missing output budget returns zero",
 			request: ModelRequest{
 				"prompt": "hello",

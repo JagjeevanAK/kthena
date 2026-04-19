@@ -214,11 +214,31 @@ func getRequestedOutputTokens(modelRequest ModelRequest) float64 {
 }
 
 func parseRequestedOutputTokenField(value interface{}) float64 {
-	numericValue, ok := value.(float64)
-	if !ok || math.IsNaN(numericValue) || math.IsInf(numericValue, 0) || numericValue < 0 {
+	switch v := value.(type) {
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			return 0
+		}
+		return v
+	case int:
+		if v < 0 {
+			return 0
+		}
+		return float64(v)
+	case int64:
+		if v < 0 {
+			return 0
+		}
+		return float64(v)
+	case json.Number:
+		numericValue, err := v.Float64()
+		if err != nil || math.IsNaN(numericValue) || math.IsInf(numericValue, 0) || numericValue < 0 {
+			return 0
+		}
+		return numericValue
+	default:
 		return 0
 	}
-	return numericValue
 }
 
 func (r *Router) calculateRequestPriority(userID, modelName string, inputTokens int, modelRequest ModelRequest) enqueuePriorityDetails {
@@ -1096,13 +1116,14 @@ func (r *Router) handleFairnessScheduling(c *gin.Context, modelRequest ModelRequ
 	}
 
 	queueReq := &datastore.Request{
-		ReqID:       requestID,
-		UserID:      userId,
-		ModelName:   modelName,
-		Priority:    priorityDetails.FinalPriority,
-		RequestTime: time.Now(),
-		NotifyChan:  make(chan struct{}),
-		CancelCh:    reqCtx.Done(),
+		ReqID:          requestID,
+		UserID:         userId,
+		ModelName:      modelName,
+		Priority:       priorityDetails.FinalPriority,
+		PriorityOffset: priorityDetails.EstimatedRequestCost,
+		RequestTime:    time.Now(),
+		NotifyChan:     make(chan struct{}),
+		CancelCh:       reqCtx.Done(),
 	}
 
 	if err := r.store.Enqueue(queueReq); err != nil {
