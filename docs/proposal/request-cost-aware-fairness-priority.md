@@ -33,9 +33,10 @@ finalPriority = historicalUsage + estimatedRequestCost
 ```
 
 Lower numeric priority continues to mean higher scheduling priority. The
-historical component is the current sliding-window usage for the request's
-`(user, model)` pair. The current request cost is an enqueue-time estimate and
-does not replace post-response accounting.
+historical component is the current fairness priority for the request's
+`(user, model)` pair, computed from the existing sliding-window tracker and
+priority weights. The current request cost is an enqueue-time estimate and does
+not replace post-response accounting.
 
 ### Motivation
 
@@ -44,10 +45,10 @@ expected cost of the request currently entering the queue. Without the current
 request estimate, two users with the same historical usage are treated the same
 at enqueue time even when one request asks for a much larger output budget.
 
-This proposal also clarifies terminology from the design discussion in
-`#757`: `historicalUsage` means the weighted sliding-window token usage returned
-by the token tracker for `(user, model)`. It is not a new persisted field and it
-is not the estimated cost of the request being enqueued.
+This proposal also clarifies terminology from the design discussion in `#757`:
+`historicalUsage` means the existing fairness score derived from the
+sliding-window tracker for `(user, model)`. It is not a new persisted field and
+it is not the estimated cost of the request being enqueued.
 
 #### Goals
 
@@ -74,8 +75,9 @@ is not the estimated cost of the request being enqueued.
 At enqueue time, the router calculates a request-cost-aware priority from two
 parts:
 
-1. Historical usage: recent weighted usage for the same `(user, model)` from the
-   token tracker.
+1. Historical usage: the same historical fairness score already used by queue
+   refresh and rebuild, derived from recent weighted usage for the same
+   `(user, model)`.
 2. Estimated request cost: weighted input tokens plus requested output token
    budget from the current request.
 
@@ -110,17 +112,26 @@ priority calculations.
 
 #### Configuration Scope
 
-This proposal uses the existing fairness token cost weights:
+This proposal uses the existing fairness token cost weights for the enqueue-time
+request estimate:
 
 ```text
 FAIRNESS_INPUT_TOKEN_WEIGHT
 FAIRNESS_OUTPUT_TOKEN_WEIGHT
 ```
 
-This proposal does not introduce CRD, CLI, or Helm value changes. Compatibility
-or deprecation work around `FAIRNESS_PRIORITY_TOKEN_WEIGHT` and
-`FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT` should be discussed separately unless
-maintainers decide it must be folded into this change.
+It also preserves the existing historical fairness configuration for enqueue,
+refresh, and rebuild:
+
+```text
+FAIRNESS_PRIORITY_TOKEN_WEIGHT
+FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT
+```
+
+This means enqueue continues to honor existing priority-weight tuning for the
+historical component, while the new request-cost component remains based on the
+input/output token weights above. This proposal does not introduce CRD, CLI, or
+Helm value changes.
 
 #### Observability
 
@@ -137,9 +148,16 @@ No new metrics are required for this proposal.
 
 #### Priority Components
 
-`historicalUsage` is the existing weighted usage stored by the token tracker for
-the `(user, model)` pair. It represents prior completed requests within the
-sliding window.
+`historicalUsage` is the existing fairness score for the `(user, model)` pair:
+
+```text
+historicalUsage =
+  FAIRNESS_PRIORITY_TOKEN_WEIGHT * weightedTokenUsage +
+  FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT * requestCount
+```
+
+with the same defaults and semantics already used by datastore priority refresh.
+This keeps enqueue and refresh calculations aligned.
 
 `estimatedRequestCost` is only the current request's estimated cost:
 
@@ -147,9 +165,12 @@ sliding window.
 inputWeight * inputTokens + outputWeight * requestedOutputTokens
 ```
 
-These two values are added for enqueue ordering. After the request completes,
-the existing post-response accounting continues to update real usage in the
-token tracker.
+These two values are added for enqueue ordering. The request-cost estimate
+reuses `FAIRNESS_INPUT_TOKEN_WEIGHT` and `FAIRNESS_OUTPUT_TOKEN_WEIGHT`, which
+are also used by the token tracker when recording weighted token usage; this is
+intentional so both terms stay in the same weighted-token units. After the
+request completes, the existing post-response accounting continues to update
+real usage in the token tracker.
 
 #### Refresh Behavior
 
@@ -176,9 +197,11 @@ Unit tests should cover:
    cost.
 4. Request-size sensitivity for users with the same historical usage.
 5. Fallback to input-only cost when output budget is missing or zero.
-6. Preservation of the request-cost offset during priority refresh and heap
-   rebuild.
-7. Debug logging gate behavior where practical.
+6. Historical-score consistency with configured priority token/request-count
+   weights.
+7. Preservation of the request-cost offset during priority refresh and heap
+   rebuild, including the unchanged-final-priority equality case.
+8. Debug logging gate behavior where practical.
 
 E2E and load tests are out of scope for this narrowly scoped proposal.
 
@@ -199,7 +222,7 @@ request's expected cost while the request is waiting in the queue.
 #### Redesign Fairness Configuration In This Change
 
 The router and datastore fairness paths include both input/output token weights
-and priority token/request-count weights. Fully unifying or deprecating those
-configuration surfaces is a larger compatibility decision. This proposal keeps
-that broader configuration cleanup out of scope and focuses on the request-cost
-enqueue behavior.
+and priority token/request-count weights. This proposal keeps those existing
+configuration surfaces and aligns enqueue with refresh/rebuild rather than
+trying to collapse them into a new model. A broader deprecation or simplification
+of the fairness knobs can be evaluated separately.

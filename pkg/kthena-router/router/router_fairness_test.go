@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -36,12 +35,17 @@ import (
 
 type captureEnqueueStore struct {
 	datastore.Store
-	tokenCount float64
-	lastReq    *datastore.Request
+	tokenCount   float64
+	requestCount int
+	lastReq      *datastore.Request
 }
 
 func (s *captureEnqueueStore) GetTokenCount(userId, modelName string) (float64, error) {
 	return s.tokenCount, nil
+}
+
+func (s *captureEnqueueStore) GetRequestCount(userId, modelName string) (int, error) {
+	return s.requestCount, nil
 }
 
 func (s *captureEnqueueStore) Enqueue(req *datastore.Request) error {
@@ -135,9 +139,10 @@ func TestGetRequestedOutputTokens(t *testing.T) {
 
 func TestCalculateRequestPriority_UsesHistoricalAndEstimatedCost(t *testing.T) {
 	r := &Router{
-		store:             &captureEnqueueStore{Store: datastore.New(), tokenCount: 15},
-		inputTokenWeight:  1.5,
-		outputTokenWeight: 2.5,
+		store:               &captureEnqueueStore{Store: datastore.New(), tokenCount: 15},
+		inputTokenWeight:    1.5,
+		outputTokenWeight:   2.5,
+		priorityTokenWeight: 1.0,
 	}
 
 	priority := r.calculateRequestPriority("u1", "m1", 10, ModelRequest{"max_tokens": float64(4)})
@@ -150,9 +155,10 @@ func TestCalculateRequestPriority_UsesHistoricalAndEstimatedCost(t *testing.T) {
 
 func TestCalculateRequestPriority_ZeroOutputBudgetFallsBackToInputOnly(t *testing.T) {
 	r := &Router{
-		store:             &captureEnqueueStore{Store: datastore.New(), tokenCount: 7},
-		inputTokenWeight:  2.0,
-		outputTokenWeight: 3.0,
+		store:               &captureEnqueueStore{Store: datastore.New(), tokenCount: 7},
+		inputTokenWeight:    2.0,
+		outputTokenWeight:   3.0,
+		priorityTokenWeight: 1.0,
 	}
 
 	priority := r.calculateRequestPriority("u1", "m1", 9, ModelRequest{"prompt": "hello"})
@@ -162,13 +168,31 @@ func TestCalculateRequestPriority_ZeroOutputBudgetFallsBackToInputOnly(t *testin
 	assert.Equal(t, 25.0, priority.FinalPriority)
 }
 
+func TestCalculateRequestPriority_UsesConfiguredHistoricalWeights(t *testing.T) {
+	r := &Router{
+		store:                    &captureEnqueueStore{Store: datastore.New(), tokenCount: 10, requestCount: 4},
+		inputTokenWeight:         1.0,
+		outputTokenWeight:        2.0,
+		priorityTokenWeight:      1.5,
+		priorityRequestNumWeight: 3.0,
+	}
+
+	priority := r.calculateRequestPriority("u1", "m1", 6, ModelRequest{"max_tokens": float64(5)})
+
+	assert.Equal(t, 27.0, priority.HistoricalUsage)
+	assert.Equal(t, 5.0, priority.RequestedOutputTokens)
+	assert.Equal(t, 16.0, priority.EstimatedRequestCost)
+	assert.Equal(t, 43.0, priority.FinalPriority)
+}
+
 func TestHandleFairnessScheduling_PriorityChangesWithRequestSize(t *testing.T) {
 	store := &captureEnqueueStore{Store: datastore.New(), tokenCount: 20}
 	r := &Router{
-		store:             store,
-		fairnessTimeout:   time.Second,
-		inputTokenWeight:  1.0,
-		outputTokenWeight: 2.0,
+		store:               store,
+		fairnessTimeout:     time.Second,
+		inputTokenWeight:    1.0,
+		outputTokenWeight:   2.0,
+		priorityTokenWeight: 1.0,
 	}
 
 	smallCtx := newFairnessTestContext(t, "user-a", 10)
@@ -189,10 +213,11 @@ func TestHandleFairnessScheduling_PriorityChangesWithRequestSize(t *testing.T) {
 func TestHandleFairnessScheduling_HistoricalUsageIncludedInPriority(t *testing.T) {
 	store := &captureEnqueueStore{Store: datastore.New(), tokenCount: 75}
 	r := &Router{
-		store:             store,
-		fairnessTimeout:   time.Second,
-		inputTokenWeight:  1.0,
-		outputTokenWeight: 2.0,
+		store:               store,
+		fairnessTimeout:     time.Second,
+		inputTokenWeight:    1.0,
+		outputTokenWeight:   2.0,
+		priorityTokenWeight: 1.0,
 	}
 
 	c := newFairnessTestContext(t, "user-a", 20)
@@ -207,10 +232,11 @@ func TestHandleFairnessScheduling_HistoricalUsageIncludedInPriority(t *testing.T
 func TestHandleFairnessScheduling_LogVerbosityDoesNotChangeBehavior(t *testing.T) {
 	store := &captureEnqueueStore{Store: datastore.New(), tokenCount: 10}
 	r := &Router{
-		store:             store,
-		fairnessTimeout:   time.Second,
-		inputTokenWeight:  1.0,
-		outputTokenWeight: 2.0,
+		store:               store,
+		fairnessTimeout:     time.Second,
+		inputTokenWeight:    1.0,
+		outputTokenWeight:   2.0,
+		priorityTokenWeight: 1.0,
 	}
 
 	vFlag := flag.Lookup("v")
@@ -222,18 +248,19 @@ func TestHandleFairnessScheduling_LogVerbosityDoesNotChangeBehavior(t *testing.T
 		_ = flag.Set("v", originalV)
 	}()
 
+	// This test mutates global klog verbosity and must remain sequential.
 	_ = flag.Set("v", "0")
 	c1 := newFairnessTestContext(t, "user-a", 12)
 	err := r.handleFairnessScheduling(c1, ModelRequest{"max_completion_tokens": float64(8)}, "req-v0", "model-a")
 	assert.Error(t, err)
-	assert.True(t, strings.Contains(err.Error(), "failed to enqueue request"))
+	assert.Contains(t, err.Error(), "failed to enqueue request")
 	priorityAtV0 := store.lastReq.Priority
 
 	_ = flag.Set("v", "4")
 	c2 := newFairnessTestContext(t, "user-a", 12)
 	err = r.handleFairnessScheduling(c2, ModelRequest{"max_completion_tokens": float64(8)}, "req-v4", "model-a")
 	assert.Error(t, err)
-	assert.True(t, strings.Contains(err.Error(), "failed to enqueue request"))
+	assert.Contains(t, err.Error(), "failed to enqueue request")
 	priorityAtV4 := store.lastReq.Priority
 
 	assert.Equal(t, priorityAtV0, priorityAtV4)

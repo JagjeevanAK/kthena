@@ -83,9 +83,11 @@ type Router struct {
 	connectorFactory *connectors.Factory
 
 	// Fairness scheduling configuration
-	fairnessTimeout   time.Duration
-	inputTokenWeight  float64 // FAIRNESS_INPUT_TOKEN_WEIGHT
-	outputTokenWeight float64 // FAIRNESS_OUTPUT_TOKEN_WEIGHT
+	fairnessTimeout          time.Duration
+	inputTokenWeight         float64 // FAIRNESS_INPUT_TOKEN_WEIGHT
+	outputTokenWeight        float64 // FAIRNESS_OUTPUT_TOKEN_WEIGHT
+	priorityTokenWeight      float64 // FAIRNESS_PRIORITY_TOKEN_WEIGHT
+	priorityRequestNumWeight float64 // FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string) *Router {
@@ -154,17 +156,19 @@ func NewRouter(store datastore.Store, routerConfigPath string) *Router {
 	}
 
 	return &Router{
-		store:             store,
-		scheduler:         scheduler.NewScheduler(store, routerConfig),
-		authenticator:     auth.NewJWTAuthenticator(routerConfig),
-		loadRateLimiter:   loadRateLimiter,
-		accessLogger:      accessLogger,
-		metrics:           metricsInstance,
-		tokenizer:         tokenizerInstance,
-		connectorFactory:  connectors.NewDefaultFactory(),
-		fairnessTimeout:   parseFairnessTimeout(),
-		inputTokenWeight:  parseEnvFloat("FAIRNESS_INPUT_TOKEN_WEIGHT", 1.0),
-		outputTokenWeight: parseEnvFloat("FAIRNESS_OUTPUT_TOKEN_WEIGHT", 2.0),
+		store:                    store,
+		scheduler:                scheduler.NewScheduler(store, routerConfig),
+		authenticator:            auth.NewJWTAuthenticator(routerConfig),
+		loadRateLimiter:          loadRateLimiter,
+		accessLogger:             accessLogger,
+		metrics:                  metricsInstance,
+		tokenizer:                tokenizerInstance,
+		connectorFactory:         connectors.NewDefaultFactory(),
+		fairnessTimeout:          parseFairnessTimeout(),
+		inputTokenWeight:         parseEnvFloat("FAIRNESS_INPUT_TOKEN_WEIGHT", 1.0),
+		outputTokenWeight:        parseEnvFloat("FAIRNESS_OUTPUT_TOKEN_WEIGHT", 2.0),
+		priorityTokenWeight:      parseEnvFloat("FAIRNESS_PRIORITY_TOKEN_WEIGHT", 1.0),
+		priorityRequestNumWeight: parseEnvFloat("FAIRNESS_PRIORITY_REQUEST_NUM_WEIGHT", 0.0),
 	}
 }
 
@@ -242,13 +246,21 @@ func parseRequestedOutputTokenField(value interface{}) float64 {
 }
 
 func (r *Router) calculateRequestPriority(userID, modelName string, inputTokens int, modelRequest ModelRequest) enqueuePriorityDetails {
-	historicalUsage, err := r.store.GetTokenCount(userID, modelName)
+	historicalUsage, err := datastore.CalculateFairnessPriority(
+		r.store,
+		userID,
+		modelName,
+		r.priorityTokenWeight,
+		r.priorityRequestNumWeight,
+	)
 	if err != nil {
 		klog.Warningf("failed to get fairness usage for user=%s model=%s: %v", userID, modelName, err)
 		historicalUsage = 0
 	}
 
 	requestedOutputTokens := getRequestedOutputTokens(modelRequest)
+	// Reuse the same input/output weights as the token tracker so enqueue-time request
+	// cost is expressed in the same weighted-token units as the stored historical usage.
 	estimatedRequestCost := r.inputTokenWeight*float64(inputTokens) + r.outputTokenWeight*requestedOutputTokens
 	finalPriority := historicalUsage + estimatedRequestCost
 

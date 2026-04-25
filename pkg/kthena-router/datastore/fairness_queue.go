@@ -230,11 +230,11 @@ func (pq *RequestPriorityQueue) popWhenAvailable(ctx context.Context) (*Request,
 					pq.config.TokenWeight,
 					pq.config.RequestNumWeight,
 				)
-				if err == nil && newPri != req.Priority {
-					newPri += req.PriorityOffset
-					req.Priority = newPri
+				newFinalPri := newPri + req.PriorityOffset
+				if err == nil && newFinalPri != req.Priority {
+					req.Priority = newFinalPri
 					// Check if this request should still be dequeued
-					if len(pq.heap) > 0 && newPri > pq.heap[0].Priority {
+					if len(pq.heap) > 0 && newFinalPri > pq.heap[0].Priority {
 						refreshRetries++
 						if pq.metrics != nil {
 							pq.metrics.IncFairnessQueuePriorityRefresh(req.ModelName)
