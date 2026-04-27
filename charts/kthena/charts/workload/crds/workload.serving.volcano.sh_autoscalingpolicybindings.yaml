@@ -601,8 +601,8 @@ spec:
             x-kubernetes-validations:
             - message: Exactly one of heterogeneousTarget, homogeneousTarget or pdDisaggregatedTarget
                 must be set.
-              rule: has(self.heterogeneousTarget) + has(self.homogeneousTarget) +
-                has(self.pdDisaggregatedTarget) == 1
+              rule: '(has(self.heterogeneousTarget) ? 1 : 0) + (has(self.homogeneousTarget)
+                ? 1 : 0) + (has(self.pdDisaggregatedTarget) ? 1 : 0) == 1'
           status:
             description: AutoscalingPolicyBindingStatus defines the observed state
               of AutoscalingPolicyBinding.

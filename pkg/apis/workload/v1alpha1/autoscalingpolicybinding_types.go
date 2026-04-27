@@ -22,7 +22,7 @@ import (
 )
 
 // AutoscalingPolicyBindingSpec defines the desired state of AutoscalingPolicyBinding.
-// +kubebuilder:validation:XValidation:rule="has(self.heterogeneousTarget) + has(self.homogeneousTarget) + has(self.pdDisaggregatedTarget) == 1",message="Exactly one of heterogeneousTarget, homogeneousTarget or pdDisaggregatedTarget must be set."
+// +kubebuilder:validation:XValidation:rule="(has(self.heterogeneousTarget) ? 1 : 0) + (has(self.homogeneousTarget) ? 1 : 0) + (has(self.pdDisaggregatedTarget) ? 1 : 0) == 1",message="Exactly one of heterogeneousTarget, homogeneousTarget or pdDisaggregatedTarget must be set."
 type AutoscalingPolicyBindingSpec struct {
 	// PolicyRef references the AutoscalingPolicy that defines the scaling rules and metrics.
 	PolicyRef corev1.LocalObjectReference `json:"policyRef"`
