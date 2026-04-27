@@ -24,69 +24,69 @@ import (
 
 func TestSplitPDReplicas_WithRatioAndBounds(t *testing.T) {
 	tests := []struct {
-		name          string
-		total         int32
-		ratio         string
-		prefillMin    int32
-		prefillMax    int32
-		decodeMin     int32
-		decodeMax     int32
+		name           string
+		total          int32
+		ratio          string
+		prefillMin     int32
+		prefillMax     int32
+		decodeMin      int32
+		decodeMax      int32
 		currentPrefill int32
-		currentDecode int32
-		wantPrefill   int32
-		wantDecode    int32
+		currentDecode  int32
+		wantPrefill    int32
+		wantDecode     int32
 	}{
 		{
-			name:          "ratio 1:2 normal split",
-			total:         9,
-			ratio:         "1:2",
-			prefillMin:    1,
-			prefillMax:    8,
-			decodeMin:     2,
-			decodeMax:     16,
+			name:           "ratio 1:2 normal split",
+			total:          9,
+			ratio:          "1:2",
+			prefillMin:     1,
+			prefillMax:     8,
+			decodeMin:      2,
+			decodeMax:      16,
 			currentPrefill: 3,
-			currentDecode: 6,
-			wantPrefill:   3,
-			wantDecode:    6,
+			currentDecode:  6,
+			wantPrefill:    3,
+			wantDecode:     6,
 		},
 		{
-			name:          "prefill max bound hit then overflow goes to decode",
-			total:         10,
-			ratio:         "3:1",
-			prefillMin:    1,
-			prefillMax:    5,
-			decodeMin:     1,
-			decodeMax:     10,
+			name:           "prefill max bound hit then overflow goes to decode",
+			total:          10,
+			ratio:          "3:1",
+			prefillMin:     1,
+			prefillMax:     5,
+			decodeMin:      1,
+			decodeMax:      10,
 			currentPrefill: 2,
-			currentDecode: 2,
-			wantPrefill:   5,
-			wantDecode:    5,
+			currentDecode:  2,
+			wantPrefill:    5,
+			wantDecode:     5,
 		},
 		{
-			name:          "decode min bound hit",
-			total:         5,
-			ratio:         "4:1",
-			prefillMin:    1,
-			prefillMax:    10,
-			decodeMin:     2,
-			decodeMax:     10,
+			name:           "decode min bound hit",
+			total:          5,
+			ratio:          "4:1",
+			prefillMin:     1,
+			prefillMax:     10,
+			decodeMin:      2,
+			decodeMax:      10,
 			currentPrefill: 3,
-			currentDecode: 2,
-			wantPrefill:   3,
-			wantDecode:    2,
+			currentDecode:  2,
+			wantPrefill:    3,
+			wantDecode:     2,
 		},
 		{
-			name:          "empty ratio falls back to current ratio",
-			total:         6,
-			ratio:         "",
-			prefillMin:    1,
-			prefillMax:    10,
-			decodeMin:     1,
-			decodeMax:     10,
+			name:           "empty ratio falls back to current ratio",
+			total:          6,
+			ratio:          "",
+			prefillMin:     1,
+			prefillMax:     10,
+			decodeMin:      1,
+			decodeMax:      10,
 			currentPrefill: 2,
-			currentDecode: 4,
-			wantPrefill:   2,
-			wantDecode:    4,
+			currentDecode:  4,
+			wantPrefill:    2,
+			wantDecode:     4,
 		},
 	}
 
